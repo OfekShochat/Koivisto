@@ -584,6 +584,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
     // count the legal and quiet moves.
     int         legalMoves      = 0;
     int         quiets          = 0;
+    int         failed          = 0;
     U64         prevNodeCount   = td->nodes;
     U64         bestNodeCount   = 0;
 
@@ -759,6 +760,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
         if (sameMove(hashMove, m) && !pv && en.type > ALL_NODE)
             extension = 1;
 
+	bool didResearch = false;
         // principal variation search recursion.
         if (legalMoves == 0) {
             score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY, td, 0,
@@ -769,7 +771,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
                 sd->sideToReduce = !b->getActivePlayer();
             }
             // reduced search.
-            score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY - lmr + extension, ply + ONE_PLY,
+            score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY - lmr - (failed > 4 && !inCheck) + extension, ply + ONE_PLY,
                               td, 0, lmr != 0 ? b->getActivePlayer() : behindNMP, &lmr);
             if (pv)
                 sd->reduce = true;
@@ -780,9 +782,11 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             if (lmr && score > alpha)
                 score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY + extension,
                                   ply + ONE_PLY, td, 0, behindNMP);    // re-search
-            if (score > alpha && score < beta)
-                score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY,
+            if (score > alpha && score < beta) {
+                didResearch = true;
+		score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY,
                                   td, 0, behindNMP);    // re-search
+	    }
         }
 
         // undo the move
@@ -805,7 +809,10 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
                 alpha        = highestScore;
             }
             bestNodeCount = td->nodes - nodeCount;
-        }
+	    failed = 0;
+	} else if (didResearch && score < alpha - 500) {
+            failed++;
+	}
 
         // beta -cutoff
         if (score >= beta) {
