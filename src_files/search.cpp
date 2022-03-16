@@ -782,7 +782,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
 		score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY + extension,
                                   ply + ONE_PLY, td, 0, behindNMP);    // re-search
                 if (alpha - score > 250)
-                    failed++;
+                    failed += depth / 7;
                 else
                     failed = 0;
 	    }
