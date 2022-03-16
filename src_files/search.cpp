@@ -760,7 +760,6 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
         if (sameMove(hashMove, m) && !pv && en.type > ALL_NODE)
             extension = 1;
 
-	bool didResearch = false;
         // principal variation search recursion.
         if (legalMoves == 0) {
             score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY, td, 0,
@@ -780,9 +779,12 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             }
 
             if (lmr && score > alpha) {
-                didResearch = true;
 		score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY + extension,
                                   ply + ONE_PLY, td, 0, behindNMP);    // re-search
+                if (alpha - score > 250)
+                    failed++;
+                else
+                    failed = 0;
 	    }
 	    if (score > alpha && score < beta)
 		score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY,
@@ -809,9 +811,6 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
                 alpha        = highestScore;
             }
             bestNodeCount = td->nodes - nodeCount;
-	} else if (didResearch && alpha - score > 500) {
-            failed++;
-	    didResearch = false;
 	}
 
         // beta -cutoff
@@ -834,7 +833,6 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
         if (score > alpha) {
             // increase alpha
             alpha = score;
-	    failed = 0;
         }
 
         // if this loop finished, we can increment the legal move counter by one which is important
