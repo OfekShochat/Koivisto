@@ -779,14 +779,14 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
                 sd->sideToReduce = b->getActivePlayer();
             }
 
-            if (lmr && score > alpha)
-                score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY + extension,
-                                  ply + ONE_PLY, td, 0, behindNMP);    // re-search
-            if (score > alpha && score < beta) {
+            if (lmr && score > alpha) {
                 didResearch = true;
+		score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY + extension,
+                                  ply + ONE_PLY, td, 0, behindNMP);    // re-search
+	    }
+	    if (score > alpha && score < beta)
 		score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY,
                                   td, 0, behindNMP);    // re-search
-	    }
         }
 
         // undo the move
@@ -809,9 +809,9 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
                 alpha        = highestScore;
             }
             bestNodeCount = td->nodes - nodeCount;
-	    failed = 0;
-	} else if (didResearch && score < alpha - 500) {
+	} else if (didResearch && alpha - score > 500) {
             failed++;
+	    didResearch = false;
 	}
 
         // beta -cutoff
@@ -834,6 +834,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
         if (score > alpha) {
             // increase alpha
             alpha = score;
+	    failed = 0;
         }
 
         // if this loop finished, we can increment the legal move counter by one which is important
