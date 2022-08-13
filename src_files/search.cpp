@@ -22,6 +22,7 @@
 #include "bitboard.h"
 #include "history.h"
 #include "timemanager.h"
+#include "transpositiontable.h"
 #include "uciassert.h"
 #include "movegen.h"
 #include "newmovegen.h"
@@ -858,6 +859,8 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             if (sd->isKiller(m, ply, b->getActivePlayer()))
                 lmr--;
             if (sd->reduce && sd->sideToReduce != b->getActivePlayer())
+                lmr++;
+            if (!pv && ply > 7 && en.zobrist == key >> 32 && history + FUTILITY_MARGIN < 0)
                 lmr++;
             lmr -= bitCount(getNewThreats(b, m));
             if (lmr > MAX_PLY) {
