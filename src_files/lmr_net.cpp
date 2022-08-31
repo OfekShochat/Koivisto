@@ -25,7 +25,7 @@ class Network {
     float out_bias_[O];
 
   public:
-    void forward(int inputs[16], float out[O]) {
+    void forward(int inputs[I], float out[O]) {
         float scratch[H] = hidden_bias_;
         float scratch2[O] = out_bias_;
 

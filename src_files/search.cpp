@@ -18,15 +18,17 @@
  ****************************************************************************************************/
 
 #include "search.h"
+
 #include "attacks.h"
 #include "bitboard.h"
 #include "history.h"
-#include "timemanager.h"
-#include "uciassert.h"
+#include "move.h"
 #include "movegen.h"
 #include "newmovegen.h"
 #include "polyglot.h"
 #include "syzygy/tbprobe.h"
+#include "timemanager.h"
+#include "uciassert.h"
 
 #include <thread>
 
@@ -34,14 +36,34 @@ using namespace attacks;
 using namespace bb;
 using namespace move;
 
-int  lmrReductions[256][256];
+struct data_t {
+    bool    capture;
+    bool    pv;
+    int     threats_num;
+    bool    castle;
+    bool    promotion;
+    int16_t see;
+    bool    hashmove;
+    int     depth;
+    int     ply;
+    bool    improving;
+    bool    killer;
+    int     history;
+    bool    target_reached;
+    int     alpha;
+    int     eval;
+    bool    incheck;
+    int     lmr;
+} __attribute__((packed));
 
-int  RAZOR_MARGIN     = 190;
-int  FUTILITY_MARGIN  = 68;
-int  SE_MARGIN_STATIC = 0;
-int  LMR_DIV          = 267;
+int lmrReductions[256][256];
 
-int  lmp[2][8]        = {{0, 2, 3, 5, 8, 12, 17, 23}, {0, 3, 6, 9, 12, 18, 28, 40}};
+int RAZOR_MARGIN     = 190;
+int FUTILITY_MARGIN  = 68;
+int SE_MARGIN_STATIC = 0;
+int LMR_DIV          = 267;
+
+int lmp[2][8]        = {{0, 2, 3, 5, 8, 12, 17, 23}, {0, 3, 6, 9, 12, 18, 28, 40}};
 
 /**
  * =================================================================================
@@ -59,29 +81,24 @@ bool hasOnlyPawns(Board* board, Color color) {
 
     // compare total team occupation with pawn and king bitboard
     return board->getTeamOccupiedBB(color)
-           == ((board->getPieceBB(color, PAWN)
-              | board->getPieceBB(color, KING)));
+           == ((board->getPieceBB(color, PAWN) | board->getPieceBB(color, KING)));
 }
 
-template<Color color>
-U64 getThreatsOfSide(Board* b, SearchData* sd, Depth ply){
-    const U64 occupied         = b->getOccupiedBB();
-    
-    const U64 opp_major  = b->getPieceBB<!color, QUEEN >()
-                         | b->getPieceBB<!color, ROOK  >();
-    const U64 opp_minor  = b->getPieceBB<!color, KNIGHT>()
-                         | b->getPieceBB<!color, BISHOP>();
-    const U64 opp_queen  = b->getPieceBB<!color, QUEEN >();
-    const U64 pawns      = b->getPieceBB< color, PAWN  >();
-    
+template<Color color> U64 getThreatsOfSide(Board* b, SearchData* sd, Depth ply) {
+    const U64 occupied  = b->getOccupiedBB();
+
+    const U64 opp_major = b->getPieceBB<!color, QUEEN>() | b->getPieceBB<!color, ROOK>();
+    const U64 opp_minor = b->getPieceBB<!color, KNIGHT>() | b->getPieceBB<!color, BISHOP>();
+    const U64 opp_queen = b->getPieceBB<!color, QUEEN>();
+    const U64 pawns     = b->getPieceBB<color, PAWN>();
+
     // pawn attacks
-    U64 pawn_attacks     = color == WHITE ?
-                                     shiftNorthEast(pawns) | shiftNorthWest(pawns) :
-                                     shiftSouthEast(pawns) | shiftSouthWest(pawns);
-    
+    U64 pawn_attacks = color == WHITE ? shiftNorthEast(pawns) | shiftNorthWest(pawns)
+                                      : shiftSouthEast(pawns) | shiftSouthWest(pawns);
+
     // minor attacks
     U64 minor_attacks = 0;
-    U64 k = b->getPieceBB<color, KNIGHT>();
+    U64 k             = b->getPieceBB<color, KNIGHT>();
     while (k) {
         minor_attacks |= KNIGHT_ATTACKS[bitscanForward(k)];
         k = lsbReset(k);
@@ -91,23 +108,23 @@ U64 getThreatsOfSide(Board* b, SearchData* sd, Depth ply){
         minor_attacks |= lookUpBishopAttacks(bitscanForward(k), occupied);
         k = lsbReset(k);
     }
-    
+
     // rook attacks
     U64 rook_attacks = 0;
-    k = b->getPieceBB(color, ROOK);
+    k                = b->getPieceBB(color, ROOK);
     while (k) {
         rook_attacks |= lookUpRookAttacks(bitscanForward(k), occupied);
         k = lsbReset(k);
     }
 
     // mask pawn attacks only to minor and major pieces
-    pawn_attacks  &= opp_major | opp_minor;
+    pawn_attacks &= opp_major | opp_minor;
     minor_attacks &= opp_major;
-    rook_attacks  &= opp_queen;
+    rook_attacks &= opp_queen;
 
-    sd->threatCount[ply][color]  = bitCount(pawn_attacks );
+    sd->threatCount[ply][color] = bitCount(pawn_attacks);
     sd->threatCount[ply][color] += bitCount(minor_attacks);
-    sd->threatCount[ply][color] += bitCount(rook_attacks );
+    sd->threatCount[ply][color] += bitCount(rook_attacks);
 
     return pawn_attacks | rook_attacks | minor_attacks;
 }
@@ -116,14 +133,14 @@ void getThreats(Board* b, SearchData* sd, Depth ply) {
     // compute threats for both sides
     U64 whiteThreats = getThreatsOfSide<WHITE>(b, sd, ply);
     U64 blackThreats = getThreatsOfSide<BLACK>(b, sd, ply);
-    
+
     // get the threats to the active player
     U64 threats = b->getActivePlayer() == WHITE ? blackThreats : whiteThreats;
-    
+
     // store
-    if(threats){
+    if (threats) {
         sd->mainThreat[ply] = bitscanForward(threats);
-    }else{
+    } else {
         sd->mainThreat[ply] = 64;
     }
 }
@@ -135,12 +152,11 @@ U64 getNewThreats(Board* b, move::Move m) {
     const Square sqFrom   = getSquareFrom(m);
     const Color  color    = b->getActivePlayer();
 
-    U64    attacks        = 0;
-    U64 sqBB              = ONE << sqTo; 
+    U64          attacks  = 0;
+    U64          sqBB     = ONE << sqTo;
 
     switch (p) {
-        case QUEEN:
-            return 0;
+        case QUEEN: return 0;
         case ROOK:
             attacks = lookUpRookAttacks(sqTo, occupied) & ~lookUpRookAttacks(sqFrom, occupied);
             return attacks & (b->getPieceBB(!color, QUEEN));
@@ -151,21 +167,19 @@ U64 getNewThreats(Board* b, move::Move m) {
             attacks = KNIGHT_ATTACKS[sqTo];
             return attacks & (b->getPieceBB(!color, QUEEN) | b->getPieceBB(!color, ROOK));
         case PAWN:
-            attacks = color == WHITE ?
-                                     shiftNorthEast(sqBB) | shiftNorthWest(sqBB) :
-                                     shiftSouthEast(sqBB) | shiftSouthWest(sqBB);
-            return attacks & (b->getPieceBB(!color, QUEEN) | b->getPieceBB(!color, ROOK) | b->getPieceBB(!color, BISHOP) | b->getPieceBB(!color, KNIGHT));
-        case KING:
-            return 0;
-        default:
-            __builtin_unreachable();
-            return 0;
+            attacks = color == WHITE ? shiftNorthEast(sqBB) | shiftNorthWest(sqBB)
+                                     : shiftSouthEast(sqBB) | shiftSouthWest(sqBB);
+            return attacks
+                   & (b->getPieceBB(!color, QUEEN) | b->getPieceBB(!color, ROOK)
+                      | b->getPieceBB(!color, BISHOP) | b->getPieceBB(!color, KNIGHT));
+        case KING: return 0;
+        default: __builtin_unreachable(); return 0;
     }
 }
 
 void initLMR() {
-    for (int d = 0; d < 256; d++){
-        for (int m = 0; m < 256; m++){
+    for (int d = 0; d < 256; d++) {
+        for (int m = 0; m < 256; m++) {
             lmrReductions[d][m] = 1.25 + log(d) * log(m) * 100 / LMR_DIV;
         }
     }
@@ -182,20 +196,20 @@ void initLMR() {
 Move Search::bestMove(Board* b, TimeManager* timeman, int threadId) {
     UCI_ASSERT(b);
     UCI_ASSERT(timeman);
-    
+
     // set the depth to max depth, correct the depth if a depth limit is set
     Depth maxDepth = MAX_PLY;
     if (timeman->depth_limit.enabled)
-        maxDepth = std::min((Depth)MAX_PLY, timeman->depth_limit.depth);
-    
+        maxDepth = std::min((Depth) MAX_PLY, timeman->depth_limit.depth);
+
     // if the main thread calls this function, we need to generate the search data for all the threads
     // first
     if (threadId == 0) {
-        
+
         // store the time manager locally
         // also dtz probing will use the time manager
         this->timeManager = timeman;
-        
+
         // if there is a dtz move available, do not start any threads or search at all. just do the
         // dtz move
         Move dtzMove = this->probeDTZ(b);
@@ -210,8 +224,8 @@ Move Search::bestMove(Board* b, TimeManager* timeman, int threadId) {
 
         // Clamp MultiPV to the root move count
         MoveList rootMoves = legals(b);
-        multiPv = std::min(multiPvDefault, rootMoves.getSize());
-        
+        multiPv            = std::min(multiPvDefault, rootMoves.getSize());
+
         // we need to reset the hash between searches
         this->table->incrementAge();
 
@@ -251,8 +265,8 @@ Move Search::bestMove(Board* b, TimeManager* timeman, int threadId) {
     // Also, its relevant because if we stop the search even if the search has not finished, the board
     // object will have a random position from the tree. Using this would lead to an illegal/not
     // existing pv
-    Board       searchBoard {*b};
-    Board       printBoard {*b};
+    Board searchBoard {*b};
+    Board printBoard {*b};
     // dropout means that we stopped the search. It is important to reset this before we
     // start searching.
     td->dropOut = false;
@@ -270,7 +284,8 @@ Move Search::bestMove(Board* b, TimeManager* timeman, int threadId) {
             // do not use aspiration windows if we are in the first few operations since they will be
             // done very quick anyway
             if (depth < 6) {
-                score = this->pvSearch(&searchBoard, -MAX_MATE_SCORE, MAX_MATE_SCORE, depth, 0, td, 0, 2);
+                score =
+                    this->pvSearch(&searchBoard, -MAX_MATE_SCORE, MAX_MATE_SCORE, depth, 0, td, 0, 2);
                 prevScore = score;
             } else {
                 score = prevScore = td->rootMoves[td->pvIdx].prevScore;
@@ -303,17 +318,17 @@ Move Search::bestMove(Board* b, TimeManager* timeman, int threadId) {
             // compute a score which puts the nodes we spent looking at the best move
             // in relation to all the nodes searched so far (only thread local)
             int timeManScore = td->searchData.spentEffort[getSquareFrom(td->searchData.bestMove)]
-                                                        [getSquareTo  (td->searchData.bestMove)]
-                            * 100 / td->nodes;
+                                                         [getSquareTo(td->searchData.bestMove)]
+                               * 100 / td->nodes;
 
-            int evalScore    = prevScore - score;
+            int evalScore = prevScore - score;
 
-            
             // Copy the PV line into the corresponding root move slot
-            RootMove& curRootMove = *std::find(&td->rootMoves[0], &td->rootMoves[td->rootMoveCount], td->pv[0][0]);
+            RootMove& curRootMove =
+                *std::find(&td->rootMoves[0], &td->rootMoves[td->rootMoveCount], td->pv[0][0]);
             std::copy_n(td->pv[0], td->pvLen[0], curRootMove.pv);
-            curRootMove.pvLen = td->pvLen[0];
-            curRootMove.score = score;
+            curRootMove.pvLen    = td->pvLen[0];
+            curRootMove.score    = score;
             curRootMove.seldepth = td->seldepth;
 
             // Sort the root move list
@@ -321,20 +336,17 @@ Move Search::bestMove(Board* b, TimeManager* timeman, int threadId) {
 
             // print the info string if its the main thread, don't do partial multipv
             // updates when elapsed time is low to avoid cluttering stdout
-            if (threadId == 0 && (td->pvIdx + 1 == multiPv || (depth > 1 && this->timeManager->elapsedTime() >= 3000))) {
+            if (threadId == 0
+                && (td->pvIdx + 1 == multiPv
+                    || (depth > 1 && this->timeManager->elapsedTime() >= 3000))) {
                 for (int pvLine = 0; pvLine < td->pvIdx + 1; ++pvLine) {
-                    this->printInfoString(depth,
-                                          td->rootMoves[pvLine].seldepth,
-                                          td->rootMoves[pvLine].score,
-                                          td->rootMoves[pvLine].pv,
-                                          td->rootMoves[pvLine].pvLen,
-                                          pvLine);
+                    this->printInfoString(depth, td->rootMoves[pvLine].seldepth,
+                                          td->rootMoves[pvLine].score, td->rootMoves[pvLine].pv,
+                                          td->rootMoves[pvLine].pvLen, pvLine);
                 }
                 for (int pvLine = td->pvIdx + 1; pvLine < multiPv; ++pvLine) {
-                    this->printInfoString(depth - 1,
-                                          td->rootMoves[pvLine].seldepth,
-                                          td->rootMoves[pvLine].prevScore,
-                                          td->rootMoves[pvLine].pv,
+                    this->printInfoString(depth - 1, td->rootMoves[pvLine].seldepth,
+                                          td->rootMoves[pvLine].prevScore, td->rootMoves[pvLine].pv,
                                           td->rootMoves[pvLine].pvLen, pvLine);
                 }
                 if (td->pvIdx == 0)
@@ -349,9 +361,9 @@ Move Search::bestMove(Board* b, TimeManager* timeman, int threadId) {
         }
 
         // Update the prevScore of each rootMove, and reset the score
-        for (RootMove& rootMove: td->rootMoves) {
+        for (RootMove& rootMove : td->rootMoves) {
             rootMove.prevScore = rootMove.score;
-            rootMove.score = -MAX_MATE_SCORE;
+            rootMove.score     = -MAX_MATE_SCORE;
         }
         // Quit the loop if the timeman stopped the search
         if (timemanAbort)
@@ -404,8 +416,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
     td->nodes++;
 
     // force a stop when enough nodes have been searched
-    if (   timeManager->node_limit.enabled
-        && timeManager->node_limit.nodes <= td->nodes) {
+    if (timeManager->node_limit.enabled && timeManager->node_limit.nodes <= td->nodes) {
         this->timeManager->stopSearch();
     }
 
@@ -448,7 +459,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
 
     // check if the active player is in check. used for various pruning decisions.
     bool inCheck = b->isInCheck(b->getActivePlayer());
-    
+
     // beside keeping track of the nodes, we need to keep track of the selective depth for this
     // thread.
     if (ply > td->seldepth) {
@@ -470,9 +481,9 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
     Move        bestMove      = 0;
     Move        hashMove      = 0;
     Score       staticEval;
-    Score       ownThreats    = 0;
-    Score       enemyThreats  = 0;
-    Square      mainThreat    = 0;
+    Score       ownThreats   = 0;
+    Score       enemyThreats = 0;
+    Square      mainThreat   = 0;
 
     // ***********************************************************************************************
     // transposition table probing:
@@ -483,7 +494,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
     Entry en = table->get(key);
 
     if (en.zobrist == key >> 32 && !skipMove) {
-        hashMove = en.move;
+        hashMove   = en.move;
 
         staticEval = en.eval;
 
@@ -514,31 +525,30 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
 
     if (!inCheck) {
         getThreats(b, sd, ply);
-        ownThreats   = sd->threatCount[ply][ b->getActivePlayer()];
+        ownThreats   = sd->threatCount[ply][b->getActivePlayer()];
         enemyThreats = sd->threatCount[ply][!b->getActivePlayer()];
-        mainThreat   = sd->mainThreat [ply];
-        
+        mainThreat   = sd->mainThreat[ply];
+
         if (ply > 0 && b->getPreviousMove() != 0) {
             if (sd->eval[!b->getActivePlayer()][ply - 1] > -TB_WIN_SCORE) {
                 int improvement = -staticEval - sd->eval[!b->getActivePlayer()][ply - 1];
                 sd->maxImprovement[getSquareFrom(b->getPreviousMove())]
-                                  [getSquareTo  (b->getPreviousMove())] = improvement;
+                                  [getSquareTo(b->getPreviousMove())] = improvement;
             }
         }
     }
 
     // we check if the evaluation improves across plies.
     sd->setHistoricEval(staticEval, b->getActivePlayer(), ply);
-    bool  isImproving = inCheck ? false : sd->isImproving(staticEval, b->getActivePlayer(), ply);
+    bool isImproving = inCheck ? false : sd->isImproving(staticEval, b->getActivePlayer(), ply);
 
     if (en.zobrist == key >> 32) {
         // adjusting eval
-        if (   (en.type == PV_NODE)
-            || (en.type == CUT_NODE && staticEval < en.score)
-            || (en.type  & ALL_NODE && staticEval > en.score)) {
+        if ((en.type == PV_NODE) || (en.type == CUT_NODE && staticEval < en.score)
+            || (en.type & ALL_NODE && staticEval > en.score)) {
             staticEval = en.score;
         }
-    } 
+    }
 
     // ***********************************************************************************************
     // tablebase probing:
@@ -589,9 +599,9 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
         // will definetly be above beta and stop the search here and fail soft. Also reuse information
         // from eval to prevent pruning if the oponent has multiple threats.
         // *******************************************************************************************
-        if (   depth        <= 7
-            && staticEval   >= beta + (depth - (isImproving && !enemyThreats)) * FUTILITY_MARGIN
-            && staticEval   <  MIN_MATE_SCORE)
+        if (depth <= 7
+            && staticEval >= beta + (depth - (isImproving && !enemyThreats)) * FUTILITY_MARGIN
+            && staticEval < MIN_MATE_SCORE)
             return staticEval;
 
         if (depth == 1 && staticEval > beta + (isImproving ? 0 : 30) && !enemyThreats)
@@ -619,7 +629,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
     }
 
     // we reuse movelists for memory reasons.
-    moveGen* mGen   = &td->generators[ply];
+    moveGen* mGen = &td->generators[ply];
 
     // ***********************************************************************************************
     // probcut was first implemented in StockFish by Gary Linscott. See
@@ -627,7 +637,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
     // this is based on other top engines.
     // ***********************************************************************************************
 
-    Score     betaCut = beta + 130;
+    Score betaCut = beta + 130;
     if (!inCheck && !pv && depth > 4 && !skipMove && ownThreats
         && !(hashMove && en.depth >= depth - 3 && en.score < betaCut)) {
         mGen->init(sd, b, ply, 0, 0, 0, Q_SEARCH, 0);
@@ -678,19 +688,18 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
         if (beta <= matingValue)
             return matingValue;
     }
-    
-    Square      kingSq     = bitscanForward(b->getPieceBB(!b->getActivePlayer(), KING));
-    U64         occupiedBB = b->getOccupiedBB();
-    U64         kingCBB    = attacks::lookUpBishopAttacks(kingSq, occupiedBB) 
-                           | attacks::lookUpRookAttacks(kingSq, occupiedBB) 
-                           | KNIGHT_ATTACKS[kingSq];
-    mGen->init(sd, b, ply, hashMove, b->getPreviousMove(), b->getPreviousMove(2),
-               PV_SEARCH, mainThreat, kingCBB);
+
+    Square kingSq     = bitscanForward(b->getPieceBB(!b->getActivePlayer(), KING));
+    U64    occupiedBB = b->getOccupiedBB();
+    U64    kingCBB    = attacks::lookUpBishopAttacks(kingSq, occupiedBB)
+                  | attacks::lookUpRookAttacks(kingSq, occupiedBB) | KNIGHT_ATTACKS[kingSq];
+    mGen->init(sd, b, ply, hashMove, b->getPreviousMove(), b->getPreviousMove(2), PV_SEARCH,
+               mainThreat, kingCBB);
     // count the legal and quiet moves.
-    int         legalMoves      = 0;
-    int         quiets          = 0;
-    U64         prevNodeCount   = td->nodes;
-    U64         bestNodeCount   = 0;
+    int  legalMoves    = 0;
+    int  quiets        = 0;
+    U64  prevNodeCount = td->nodes;
+    U64  bestNodeCount = 0;
 
     Move m;
     // loop over all moves in the movelist
@@ -700,8 +709,10 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             continue;
 
         // in multipv mode, exclude root moves already analysed from the search
-        if (ply == 0 && std::find(&td->rootMoves[0], &td->rootMoves[td->pvIdx], m) != &td->rootMoves[td->pvIdx])
-            continue ;
+        if (ply == 0
+            && std::find(&td->rootMoves[0], &td->rootMoves[td->pvIdx], m)
+                   != &td->rootMoves[td->pvIdx])
+            continue;
 
         if (pv && td->threadID == 0)
             td->pvLen[ply + 1] = 0;
@@ -723,14 +734,13 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
                 // ***********************************************************************************
                 if (mGen->shouldSkip())
                     continue;
-                
+
                 if (depth <= 7 && quiets >= lmp[isImproving][depth]) {
                     mGen->skip();
                 }
 
                 // prune quiet moves that are unlikely to improve alpha
-                if (!inCheck
-                    && moveDepth <= 7
+                if (!inCheck && moveDepth <= 7
                     && sd->maxImprovement[getSquareFrom(m)][getSquareTo(m)]
                                + moveDepth * FUTILITY_MARGIN + 100
                                + sd->eval[b->getActivePlayer()][ply]
@@ -755,9 +765,9 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             // if the depth we are going to search the move at is small enough and the static exchange
             // evaluation for the given move is very negative, dont consider this quiet move as well.
             // ***************************************************************************************
-            if (moveDepth <= 5 + quiet * 3
-                && (getCapturedPieceType(m)) < (getMovingPieceType(m))
-                && (isCapture(m) ? mGen->lastSee : b->staticExchangeEvaluation(m)) <= (quiet ? -40 * moveDepth : -100 * moveDepth))
+            if (moveDepth <= 5 + quiet * 3 && (getCapturedPieceType(m)) < (getMovingPieceType(m))
+                && (isCapture(m) ? mGen->lastSee : b->staticExchangeEvaluation(m))
+                       <= (quiet ? -40 * moveDepth : -100 * moveDepth))
                 continue;
         }
 
@@ -782,20 +792,14 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
         // standard implementation apart from the fact that we cancel lmr of parent node in-case the
         // node turns out to be singular. Also standard multi-cut.
         // *******************************************************************************************
-        if (depth >= 8
-            && !skipMove
-            && !inCheck
-            &&  sameMove(m, hashMove)
-            &&  legalMoves == 0
-            &&  ply        >  0
-            &&  en.depth   >= depth - 3
-            &&  abs(en.score) < MIN_MATE_SCORE
-            && (   en.type == CUT_NODE
-                || en.type == PV_NODE)) {
+        if (depth >= 8 && !skipMove && !inCheck && sameMove(m, hashMove) && legalMoves == 0 && ply > 0
+            && en.depth >= depth - 3 && abs(en.score) < MIN_MATE_SCORE
+            && (en.type == CUT_NODE || en.type == PV_NODE)) {
             // compute beta cut value
-            betaCut = std::min(static_cast<int>(en.score - SE_MARGIN_STATIC - depth * 2), static_cast<int>(beta));
+            betaCut = std::min(static_cast<int>(en.score - SE_MARGIN_STATIC - depth * 2),
+                               static_cast<int>(beta));
             // get the score from recursive call
-            score   = pvSearch(b, betaCut - 1, betaCut, depth >> 1, ply, td, m, behindNMP);
+            score = pvSearch(b, betaCut - 1, betaCut, depth >> 1, ply, td, m, behindNMP);
             if (score < betaCut) {
                 if (lmrFactor != nullptr) {
                     depth += *lmrFactor;
@@ -809,8 +813,8 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
                 if (score >= beta)
                     return score;
             }
-            mGen->init(sd, b, ply, hashMove, b->getPreviousMove(),
-                       b->getPreviousMove(2), PV_SEARCH, mainThreat, kingCBB);
+            mGen->init(sd, b, ply, hashMove, b->getPreviousMove(), b->getPreviousMove(2), PV_SEARCH,
+                       mainThreat, kingCBB);
             m = mGen->next();
         }
 
@@ -820,27 +824,21 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             if (legalMoves == 0) {
                 sd->reduce = true;
             }
-        } else if (depth < 8
-               && !skipMove
-               && !inCheck
-               &&  sameMove(m, hashMove)
-               &&  ply > 0
-               &&  sd->eval[b->getActivePlayer()][ply] < alpha - 25
-               &&  en.type == CUT_NODE) {
+        } else if (depth < 8 && !skipMove && !inCheck && sameMove(m, hashMove) && ply > 0
+                   && sd->eval[b->getActivePlayer()][ply] < alpha - 25 && en.type == CUT_NODE) {
             extension = 1;
         }
 
-        U64   nodeCount = td->nodes;
+        U64 nodeCount = td->nodes;
 
-        
         // compute the lmr based on the depth, the amount of legal moves etc.
         // we dont want to reduce if its the first move we search, or a capture with a positive see
         // score or if the depth is too small. furthermore no queen promotions are reduced
-        Depth lmr       = (legalMoves < 2 - (hashMove != 0) + pv || depth <= 2
+        Depth lmr = (legalMoves < 2 - (hashMove != 0) + pv || depth <= 2
                      || (isCapture(m) && staticExchangeEval > 0)
                      || (isPromotion && (getPromotionPieceType(m) == QUEEN)))
-                              ? 0
-                              : lmrReductions[depth][legalMoves];
+                        ? 0
+                        : lmrReductions[depth][legalMoves];
 
         // increase reduction if we are behind a null move, depending on which side we are looking at.
         // this is a sound reduction in theory.
@@ -853,7 +851,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             lmr         = lmr - history / 150;
             lmr += !isImproving;
             lmr -= pv;
-            if (!sd->targetReached) 
+            if (!sd->targetReached)
                 lmr++;
             if (sd->isKiller(m, ply, b->getActivePlayer()))
                 lmr--;
@@ -866,8 +864,30 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             if (lmr > depth - 2) {
                 lmr = depth - 2;
             }
-            if (history > 256*(2-isCapture(m)))
+            if (history > 256 * (2 - isCapture(m)))
                 lmr = 0;
+            if (td->threadID == 0) {
+                struct data_t d;
+                d.alpha          = alpha;
+                d.capture        = isCapture(m);
+                d.castle         = isCastle(m);
+                d.depth          = depth;
+                d.eval           = staticEval;
+                d.hashmove       = hashMove != 0;
+                d.history        = history;
+                d.improving      = isImproving;
+                d.incheck        = inCheck;
+                d.killer         = sd->isKiller(m, ply, b->getActivePlayer());
+                d.see            = staticExchangeEval;
+                d.promotion      = isPromotion;
+                d.target_reached = sd->targetReached;
+                d.threats_num    = bitCount(getNewThreats(b, m));
+                d.ply            = ply;
+                d.pv             = pv;
+                d.lmr            = lmr;
+                fwrite(&d, sizeof(data_t), 1, td->fout);
+            }
+            // fclose(fout);
         }
 
         // doing the move
@@ -899,11 +919,11 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             }
 
             if (lmr && score > alpha)
-                score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY + extension,
-                                  ply + ONE_PLY, td, 0, behindNMP);    // re-search
-            if (score > alpha && score < beta)
-                score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY,
+                score = -pvSearch(b, -alpha - 1, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY,
                                   td, 0, behindNMP);    // re-search
+            if (score > alpha && score < beta)
+                score = -pvSearch(b, -beta, -alpha, depth - ONE_PLY + extension, ply + ONE_PLY, td, 0,
+                                  behindNMP);    // re-search
         }
 
         // undo the move
@@ -962,10 +982,7 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
 
     // if we are inside a tournament game and at the root and there is only one legal move, no need to
     // search at all.
-    if (   timeManager->match_time_limit.enabled
-        && ply          == 0
-        && legalMoves   == 1
-        && td->threadID == 0) {
+    if (timeManager->match_time_limit.enabled && ply == 0 && legalMoves == 1 && td->threadID == 0) {
         // save best move
         sd->bestMove = bestMove;
         timeManager->stopSearch();
@@ -1031,8 +1048,8 @@ Score Search::qSearch(Board* b, Score alpha, Score beta, Depth ply, ThreadData* 
     Entry       en         = table->get(b->zobrist());
     NodeType    ttNodeType = ALL_NODE;
 
-    Score stand_pat;
-    Score bestScore = -MAX_MATE_SCORE;
+    Score       stand_pat;
+    Score       bestScore = -MAX_MATE_SCORE;
 
     // ***********************************************************************************************
     // transposition table probing:
@@ -1061,9 +1078,8 @@ Score Search::qSearch(Board* b, Score alpha, Score beta, Depth ply, ThreadData* 
     // we can also use the tt entry to adjust the evaluation.
     if (en.zobrist == key >> 32) {
         // adjusting eval
-        if (   (en.type == PV_NODE)
-            || (en.type == CUT_NODE && stand_pat < en.score)
-            || (en.type  & ALL_NODE && stand_pat > en.score)) {
+        if ((en.type == PV_NODE) || (en.type == CUT_NODE && stand_pat < en.score)
+            || (en.type & ALL_NODE && stand_pat > en.score)) {
             // save as best score
             bestScore = en.score;
         }
@@ -1074,13 +1090,12 @@ Score Search::qSearch(Board* b, Score alpha, Score beta, Depth ply, ThreadData* 
     if (alpha < bestScore)
         alpha = bestScore;
 
-    
-    moveGen* mGen   = &td->generators[ply];
+    moveGen* mGen = &td->generators[ply];
     mGen->init(sd, b, ply, 0, b->getPreviousMove(), b->getPreviousMove(2), Q_SEARCH + inCheck, 0);
 
     // keping track of the best move for the transpositions
-    Move        bestMove = 0;
-    Move        m;
+    Move bestMove = 0;
+    Move m;
 
     while ((m = mGen->next())) {
         // do not consider illegal moves
@@ -1092,13 +1107,11 @@ Score Search::qSearch(Board* b, Score alpha, Score beta, Depth ply, ThreadData* 
         // if the depth is small enough and the static exchange evaluation for the given move is very
         // negative, dont consider this quiet move as well.
         // *******************************************************************************************
-        Score see =
-            (!inCheck && (isCapture(m) || isPromotion(m))) ? mGen->lastSee : 0;
+        Score see = (!inCheck && (isCapture(m) || isPromotion(m))) ? mGen->lastSee : 0;
         if (see < 0)
             continue;
         if (see + stand_pat > beta + 200)
             return beta;
-        
 
         b->move<true>(m, table);
 
@@ -1147,21 +1160,21 @@ void Search::cleanUp() {
 }
 U64 Search::totalNodes() const {
     U64 total = 0;
-    for (const auto &td : tds) {
+    for (const auto& td : tds) {
         total += td.nodes;
     }
     return total;
 }
 int Search::selDepth() const {
     int maxSd = 0;
-    for (const auto &td : tds) {
+    for (const auto& td : tds) {
         maxSd = std::max(td.seldepth, maxSd);
     }
     return maxSd;
 }
 U64 Search::tbHits() const {
     int total = 0;
-    for (const auto &td : tds) {
+    for (const auto& td : tds) {
         total += td.tbhits;
     }
     return total;
@@ -1169,13 +1182,13 @@ U64 Search::tbHits() const {
 
 move::MoveList Search::legals(Board* board) const {
     // create a movelist to store all moves and one to only store the legal ones
-    MoveList ml{};
-    MoveList ml_legal{};
+    MoveList ml {};
+    MoveList ml_legal {};
     generatePerftMoves(board, &ml);
     // go through each move and check the move for legality
-    for(int i = 0; i < ml.getSize();i++){
+    for (int i = 0; i < ml.getSize(); i++) {
         // increase the legal count if the move is legal
-        if(board->isLegal(ml.getMove(i))) {
+        if (board->isLegal(ml.getMove(i))) {
             ml_legal.add(ml.getMove(i));
         }
     }
@@ -1187,13 +1200,13 @@ void           Search::enableInfoStrings() { this->printInfo = true; }
 void           Search::disableInfoStrings() { this->printInfo = false; }
 void           Search::useTableBase(bool val) { this->useTB = val; }
 void           Search::clearHistory() {
-    for (auto &td : tds) {
-        memset(&td.searchData.th, 0, 2*64*4096*4);
-        memset(&td.searchData.captureHistory, 0, 2*4096*4);
-        memset(&td.searchData.cmh, 0, 384*2*384*4);
-        memset(&td.searchData.fmh, 0, 384*2*384*4);
-        memset(&td.searchData.killer, 0, 2*257*2*4);
-        memset(&td.searchData.maxImprovement, 0, 64*64*4);
+              for (auto& td : tds) {
+                  memset(&td.searchData.th, 0, 2 * 64 * 4096 * 4);
+                  memset(&td.searchData.captureHistory, 0, 2 * 4096 * 4);
+                  memset(&td.searchData.cmh, 0, 384 * 2 * 384 * 4);
+                  memset(&td.searchData.fmh, 0, 384 * 2 * 384 * 4);
+                  memset(&td.searchData.killer, 0, 2 * 257 * 2 * 4);
+                  memset(&td.searchData.maxImprovement, 0, 64 * 64 * 4);
     }
 }
 void Search::clearHash() { this->table->clear(); }
@@ -1217,45 +1230,40 @@ void Search::setHashSize(int hashSize) {
     if (table)
         table->setSize(hashSize);
 }
-void Search::setMultiPv(int multiPvCount) {
-    this->multiPvDefault = multiPvCount;
-}
+void Search::setMultiPv(int multiPvCount) { this->multiPvDefault = multiPvCount; }
 void Search::stop() {
     if (timeManager)
         timeManager->stopSearch();
 }
-void Search::printInfoString(Depth depth, int sel_depth, Score score, Move* pv, uint16_t pvLen, int pvIdx) {
+void Search::printInfoString(Depth depth, int sel_depth, Score score, Move* pv, uint16_t pvLen,
+                             int pvIdx) {
 
     if (!printInfo)
         return;
 
     // extract nodes, seldepth and nps
-    U64 nodes       = totalNodes();
-    U64 tb_hits     = tbHits();
-    U64 nps         = static_cast<U64>(nodes * 1000) /
-                      static_cast<U64>(timeManager->elapsedTime() + 1);
+    U64 nodes   = totalNodes();
+    U64 tb_hits = tbHits();
+    U64 nps     = static_cast<U64>(nodes * 1000) / static_cast<U64>(timeManager->elapsedTime() + 1);
 
     // print basic info string including depth, seldepth and multiPv
     std::cout << "info"
-              << " depth "          << static_cast<int>(depth)
-              << " seldepth "       << sel_depth
-              << " multipv "        << (pvIdx + 1);
+              << " depth " << static_cast<int>(depth) << " seldepth " << sel_depth << " multipv "
+              << (pvIdx + 1);
 
     // print the score. if its a mate score, show mate xx instead of cp xx
     if (abs(score) > MIN_MATE_SCORE) {
         std::cout << " score mate " << (MAX_MATE_SCORE - abs(score) + 1) / 2 * (score > 0 ? 1 : -1);
     } else {
-        std::cout << " score cp "   << score;
+        std::cout << " score cp " << score;
     }
     // show tablebase hits if tablebase has been hit
     if (tb_hits != 0) {
-        std::cout << " tbhits "     << tb_hits;
+        std::cout << " tbhits " << tb_hits;
     }
     // show remaining information (nodes, nps, time, hash usage)
-    std::cout << " nodes "          << nodes
-              << " nps "            << nps
-              << " time "           << timeManager->elapsedTime()
-              << " hashfull "       << static_cast<int>(table->usage() * 1000);
+    std::cout << " nodes " << nodes << " nps " << nps << " time " << timeManager->elapsedTime()
+              << " hashfull " << static_cast<int>(table->usage() * 1000);
 
     // print "pv" to shell
     std::cout << " pv";
@@ -1278,21 +1286,21 @@ Score Search::probeWDL(Board* board) {
     // we cannot prove the tables if there are too many pieces on the board
     if (bitCount(board->getOccupiedBB()) > (signed) TB_LARGEST)
         return MAX_MATE_SCORE;
-    
-    U64 w_occ   = board->getTeamOccupiedBB()[WHITE];
-    U64 b_occ   = board->getTeamOccupiedBB()[BLACK];
-    U64 pawns   = board->getPieceBB<WHITE, PAWN  >() | board->getPieceBB<BLACK, PAWN  >();
-    U64 knights = board->getPieceBB<WHITE, KNIGHT>() | board->getPieceBB<BLACK, KNIGHT>();
-    U64 bishops = board->getPieceBB<WHITE, BISHOP>() | board->getPieceBB<BLACK, BISHOP>();
-    U64 rooks   = board->getPieceBB<WHITE, ROOK  >() | board->getPieceBB<BLACK, ROOK  >();
-    U64 queens  = board->getPieceBB<WHITE, QUEEN >() | board->getPieceBB<BLACK, QUEEN >();
-    U64 kings   = board->getPieceBB<WHITE, KING  >() | board->getPieceBB<BLACK, KING  >();
 
-    U64    fifty_mr     =   board->getBoardStatus()->fiftyMoveCounter;
+    U64    w_occ        = board->getTeamOccupiedBB()[WHITE];
+    U64    b_occ        = board->getTeamOccupiedBB()[BLACK];
+    U64    pawns        = board->getPieceBB<WHITE, PAWN>() | board->getPieceBB<BLACK, PAWN>();
+    U64    knights      = board->getPieceBB<WHITE, KNIGHT>() | board->getPieceBB<BLACK, KNIGHT>();
+    U64    bishops      = board->getPieceBB<WHITE, BISHOP>() | board->getPieceBB<BLACK, BISHOP>();
+    U64    rooks        = board->getPieceBB<WHITE, ROOK>() | board->getPieceBB<BLACK, ROOK>();
+    U64    queens       = board->getPieceBB<WHITE, QUEEN>() | board->getPieceBB<BLACK, QUEEN>();
+    U64    kings        = board->getPieceBB<WHITE, KING>() | board->getPieceBB<BLACK, KING>();
+
+    U64    fifty_mr     = board->getBoardStatus()->fiftyMoveCounter;
     bool   any_castling = !!(board->getBoardStatus()->castlingRights & MASK<4>);
-    Square ep_square    = std::max((Square) 0, board->getEnPassantSquare());  // board uses -1 as e.p.
-    Color  whiteToMove  = board->getActivePlayer() == WHITE;
-    
+    Square ep_square = std::max((Square) 0, board->getEnPassantSquare());    // board uses -1 as e.p.
+    Color  whiteToMove = board->getActivePlayer() == WHITE;
+
     // use the given files to prove the tables using the information from the board.
     unsigned res = tb_probe_wdl(w_occ, b_occ, kings, queens, rooks, bishops, knights, pawns, fifty_mr,
                                 any_castling, ep_square, whiteToMove);
@@ -1329,39 +1337,37 @@ Score Search::probeWDL(Board* board) {
  */
 Move Search::probeDTZ(Board* board) {
     UCI_ASSERT(board);
-    
+
     if (!useTB)
         return 0;
-    
+
     if (bitCount(board->getOccupiedBB()) > (signed) TB_LARGEST)
         return 0;
 
-    U64 w_occ   = board->getTeamOccupiedBB()[WHITE];
-    U64 b_occ   = board->getTeamOccupiedBB()[BLACK];
-    U64 pawns   = board->getPieceBB<WHITE, PAWN  >() | board->getPieceBB<BLACK, PAWN  >();
-    U64 knights = board->getPieceBB<WHITE, KNIGHT>() | board->getPieceBB<BLACK, KNIGHT>();
-    U64 bishops = board->getPieceBB<WHITE, BISHOP>() | board->getPieceBB<BLACK, BISHOP>();
-    U64 rooks   = board->getPieceBB<WHITE, ROOK  >() | board->getPieceBB<BLACK, ROOK  >();
-    U64 queens  = board->getPieceBB<WHITE, QUEEN >() | board->getPieceBB<BLACK, QUEEN >();
-    U64 kings   = board->getPieceBB<WHITE, KING  >() | board->getPieceBB<BLACK, KING  >();
-    
-    U64    fifty_mr     =   board->getBoardStatus()->fiftyMoveCounter;
-    bool   any_castling = !!(board->getBoardStatus()->castlingRights & MASK<4>);
-    Square ep_square    = std::max((Square) 0, board->getEnPassantSquare());  // board uses -1 as e.p.
-    Color  whiteToMove  = board->getActivePlayer() == WHITE;
+    U64    w_occ        = board->getTeamOccupiedBB()[WHITE];
+    U64    b_occ        = board->getTeamOccupiedBB()[BLACK];
+    U64    pawns        = board->getPieceBB<WHITE, PAWN>() | board->getPieceBB<BLACK, PAWN>();
+    U64    knights      = board->getPieceBB<WHITE, KNIGHT>() | board->getPieceBB<BLACK, KNIGHT>();
+    U64    bishops      = board->getPieceBB<WHITE, BISHOP>() | board->getPieceBB<BLACK, BISHOP>();
+    U64    rooks        = board->getPieceBB<WHITE, ROOK>() | board->getPieceBB<BLACK, ROOK>();
+    U64    queens       = board->getPieceBB<WHITE, QUEEN>() | board->getPieceBB<BLACK, QUEEN>();
+    U64    kings        = board->getPieceBB<WHITE, KING>() | board->getPieceBB<BLACK, KING>();
 
-    unsigned result = tb_probe_root(w_occ, b_occ, kings, queens, rooks, bishops, knights, pawns,
-                                          fifty_mr, any_castling, ep_square, whiteToMove, NULL);
+    U64    fifty_mr     = board->getBoardStatus()->fiftyMoveCounter;
+    bool   any_castling = !!(board->getBoardStatus()->castlingRights & MASK<4>);
+    Square ep_square = std::max((Square) 0, board->getEnPassantSquare());    // board uses -1 as e.p.
+    Color  whiteToMove = board->getActivePlayer() == WHITE;
+
+    unsigned result    = tb_probe_root(w_occ, b_occ, kings, queens, rooks, bishops, knights, pawns,
+                                       fifty_mr, any_castling, ep_square, whiteToMove, NULL);
 
     // if the result failed for some reason or the game is over, dont do anything
-    if (   result == TB_RESULT_FAILED
-        || result == TB_RESULT_CHECKMATE
-        || result == TB_RESULT_STALEMATE)
+    if (result == TB_RESULT_FAILED || result == TB_RESULT_CHECKMATE || result == TB_RESULT_STALEMATE)
         return 0;
 
     // we need the wdl and the dtz values to get the score.
-    int dtz = TB_GET_DTZ(result);
-    int wdl = TB_GET_WDL(result);
+    int   dtz = TB_GET_DTZ(result);
+    int   wdl = TB_GET_WDL(result);
 
     Score s   = 0;
 
@@ -1383,11 +1389,11 @@ Move Search::probeDTZ(Board* board) {
 
     // get the promotion piece if the target move is a promotion (this does not yet work the way it
     // should)
-    PieceType promo  = 5 - TB_GET_PROMOTES(result);
+    PieceType promo = 5 - TB_GET_PROMOTES(result);
 
     // gets the square from and square to for the move which should be played
-    Square    sqFrom = TB_GET_FROM(result);
-    Square    sqTo   = TB_GET_TO(result);
+    Square sqFrom = TB_GET_FROM(result);
+    Square sqTo   = TB_GET_TO(result);
 
     // we generate all pseudo legal moves and check for equality between the moves to make sure the
     // bits are correct.
@@ -1400,24 +1406,19 @@ Move Search::probeDTZ(Board* board) {
 
         // check if it's the same.
         if (getSquareFrom(m) == sqFrom && getSquareTo(m) == sqTo) {
-            if (   (    promo == 6
-                    && !isPromotion(m))
-                || (isPromotion(m)
-                    && promo < 6
-                    && getPromotionPieceType(m) == promo)) {
+            if ((promo == 6 && !isPromotion(m))
+                || (isPromotion(m) && promo < 6 && getPromotionPieceType(m) == promo)) {
                 std::cout << "info"
-                          << " depth "      << static_cast<int>(dtz)
-                          << " seldepth "   << static_cast<int>(selDepth());
-                std::cout << " score cp "   << s;
+                          << " depth " << static_cast<int>(dtz) << " seldepth "
+                          << static_cast<int>(selDepth());
+                std::cout << " score cp " << s;
 
                 if (tbHits() != 0) {
                     std::cout << " tbhits " << 1;
                 }
 
-                std::cout << " nodes "      << 1
-                          << " nps "        << 1
-                          << " time "       << timeManager->elapsedTime()
-                          << " hashfull "   << static_cast<int>(table->usage() * 1000);
+                std::cout << " nodes " << 1 << " nps " << 1 << " time " << timeManager->elapsedTime()
+                          << " hashfull " << static_cast<int>(table->usage() * 1000);
                 std::cout << std::endl;
 
                 return m;
@@ -1428,5 +1429,8 @@ Move Search::probeDTZ(Board* board) {
     return 0;
 }
 
-ThreadData::ThreadData(int threadId) : threadID(threadId) {}
-ThreadData::ThreadData() {}
+ThreadData::ThreadData(int threadId) : threadID(threadId) { fout = fopen("hey.bin", "w"); }
+ThreadData::ThreadData() { fout = fopen("hey.bin", "w"); }
+ThreadData::~ThreadData() {
+    fclose(fout);
+}
