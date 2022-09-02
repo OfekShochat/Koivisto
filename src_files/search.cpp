@@ -1429,8 +1429,8 @@ Move Search::probeDTZ(Board* board) {
     return 0;
 }
 
-ThreadData::ThreadData(int threadId) : threadID(threadId) { fout = fopen("hey.bin", "w"); }
-ThreadData::ThreadData() { fout = fopen("hey.bin", "w"); }
+ThreadData::ThreadData(int threadId) : threadID(threadId) { fout = fopen("/home/ghostway/projects/cpp/Koivisto/hey.bin", "w"); }
+ThreadData::ThreadData() { fout = fopen("/home/ghostway/projects/cpp/Koivisto/hey.bin", "w"); }
 ThreadData::~ThreadData() {
     fclose(fout);
 }
