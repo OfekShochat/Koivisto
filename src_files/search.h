@@ -73,7 +73,7 @@ struct ThreadData {
     bool       dropOut  = false;
     // search data which contains additional information like history tables etc
     SearchData searchData {};
-    FILE *fout;
+    // FILE *fout;
     // move generators to not reallocate
     moveGen    generators[bb::MAX_INTERNAL_PLY] {};
     

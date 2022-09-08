@@ -29,32 +29,34 @@
 #include "syzygy/tbprobe.h"
 #include "timemanager.h"
 #include "uciassert.h"
+#include "lmr_net.cpp"
 
+#include <cstdio>
 #include <thread>
 
 using namespace attacks;
 using namespace bb;
 using namespace move;
 
-struct data_t {
-    bool    capture;
-    bool    pv;
-    int     threats_num;
-    bool    castle;
-    bool    promotion;
-    int16_t see;
-    bool    hashmove;
-    int     depth;
-    int     ply;
-    bool    improving;
-    bool    killer;
-    int     history;
-    bool    target_reached;
-    int     alpha;
-    int     eval;
-    bool    incheck;
-    int     lmr;
-} __attribute__((packed));
+// struct data_t {
+//     bool    capture;
+//     bool    pv;
+//     int     threats_num;
+//     bool    castle;
+//     bool    promotion;
+//     int16_t see;
+//     bool    hashmove;
+//     int     depth;
+//     int     ply;
+//     bool    improving;
+//     bool    killer;
+//     int     history;
+//     bool    target_reached;
+//     int     alpha;
+//     int     eval;
+//     bool    incheck;
+//     int     lmr;
+// } __attribute__((packed));
 
 int lmrReductions[256][256];
 
@@ -846,47 +848,54 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             lmr++;
 
         if (lmr) {
+            std::cout << "pooooo" << std::endl;
+    std::cout << std::endl;
+            // Network<16, 8, 1> network;
             int history = sd->getHistories(m, b->getActivePlayer(), b->getPreviousMove(),
                                            b->getPreviousMove(2), mainThreat);
-            lmr         = lmr - history / 150;
-            lmr += !isImproving;
-            lmr -= pv;
-            if (!sd->targetReached)
-                lmr++;
-            if (sd->isKiller(m, ply, b->getActivePlayer()))
-                lmr--;
-            if (sd->reduce && sd->sideToReduce != b->getActivePlayer())
-                lmr++;
-            lmr -= bitCount(getNewThreats(b, m));
-            if (lmr > MAX_PLY) {
-                lmr = 0;
-            }
-            if (lmr > depth - 2) {
-                lmr = depth - 2;
-            }
-            if (history > 256 * (2 - isCapture(m)))
-                lmr = 0;
-            if (td->threadID == 0) {
-                struct data_t d;
-                d.alpha          = alpha;
-                d.capture        = isCapture(m);
-                d.castle         = isCastle(m);
-                d.depth          = depth;
-                d.eval           = staticEval;
-                d.hashmove       = hashMove != 0;
-                d.history        = history;
-                d.improving      = isImproving;
-                d.incheck        = inCheck;
-                d.killer         = sd->isKiller(m, ply, b->getActivePlayer());
-                d.see            = staticExchangeEval;
-                d.promotion      = isPromotion;
-                d.target_reached = sd->targetReached;
-                d.threats_num    = bitCount(getNewThreats(b, m));
-                d.ply            = ply;
-                d.pv             = pv;
-                d.lmr            = lmr;
-                fwrite(&d, sizeof(data_t), 1, td->fout);
-            }
+            // float *out = {0};
+            // int hi[16] = {alpha, isCapture(m), isCastle(m), depth, staticEval, hashMove != 0, history, isImproving, inCheck, sd->isKiller(m, ply, b->getActivePlayer()), staticExchangeEval, isPromotion, sd->targetReached, bitCount(getNewThreats(b, m)), ply, pv};
+            // network.forward(hi, out);
+            // lmr = out[0];
+            // lmr         = lmr - history / 150;
+            // lmr += !isImproving;
+            // lmr -= pv;
+            // if (!sd->targetReached)
+            //     lmr++;
+            // if (sd->isKiller(m, ply, b->getActivePlayer()))
+            //     lmr--;
+            // if (sd->reduce && sd->sideToReduce != b->getActivePlayer())
+            //     lmr++;
+            // lmr -= bitCount(getNewThreats(b, m));
+            // if (lmr > MAX_PLY) {
+            //     lmr = 0;
+            // }
+            // if (lmr > depth - 2) {
+            //     lmr = depth - 2;
+            // }
+            // if (history > 256 * (2 - isCapture(m)))
+            //     lmr = 0;
+            // if (td->threadID == 0) {
+            //     struct data_t d;
+            //     d.alpha          = alpha;
+            //     d.capture        = isCapture(m);
+            //     d.castle         = isCastle(m);
+            //     d.depth          = depth;
+            //     d.eval           = staticEval;
+            //     d.hashmove       = hashMove != 0;
+            //     d.history        = history;
+            //     d.improving      = isImproving;
+            //     d.incheck        = inCheck;
+            //     d.killer         = sd->isKiller(m, ply, b->getActivePlayer());
+            //     d.see            = staticExchangeEval;
+            //     d.promotion      = isPromotion;
+            //     d.target_reached = sd->targetReached;
+            //     d.threats_num    = bitCount(getNewThreats(b, m));
+            //     d.ply            = ply;
+            //     d.pv             = pv;
+            //     d.lmr            = lmr;
+            //     fwrite(&d, sizeof(data_t), 1, td->fout);
+            // }
             // fclose(fout);
         }
 
@@ -1429,8 +1438,8 @@ Move Search::probeDTZ(Board* board) {
     return 0;
 }
 
-ThreadData::ThreadData(int threadId) : threadID(threadId) { fout = fopen("/home/ghostway/projects/cpp/Koivisto/hey.bin", "w"); }
-ThreadData::ThreadData() { fout = fopen("/home/ghostway/projects/cpp/Koivisto/hey.bin", "w"); }
+ThreadData::ThreadData(int threadId) : threadID(threadId) { /* fout = fopen("/home/ghostway/projects/cpp/Koivisto/hey.bin", "w");  */}
+ThreadData::ThreadData() { /*fout = fopen("/home/ghostway/projects/cpp/Koivisto/hey.bin", "w");*/ }
 ThreadData::~ThreadData() {
-    fclose(fout);
+    // fclose(fout);
 }

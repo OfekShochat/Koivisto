@@ -20,7 +20,7 @@ EVALFILE   = $(_ROOT)/networks/default.net
 
 
 # compilation flags
-MARCH_FLAG     = -march=native
+MARCH_FLAG     = -march=native -g
 PGO_PRE_FLAGS  = -fprofile-generate -lgcov
 PGO_POST_FLAGS = -fprofile-use -fno-peel-loops -fno-tracer
 
@@ -36,7 +36,7 @@ STATIC   ?= 0
 NATIVE   ?= 0
 DETECT   ?= 1
 PGO      ?= 0
-DEBUG    ?= 0
+DEBUG    ?= 1
 LTO      ?= 0
 PEXT     ?= 0
 # vector instructions

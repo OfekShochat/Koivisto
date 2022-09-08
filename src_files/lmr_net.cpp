@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <cstring>
+#include <iostream>
 
 template <int S>
 void dot(float a[S], float b[S], float *out) {
@@ -25,15 +27,29 @@ class Network {
     float out_bias_[O];
 
   public:
+    Network() {
+        std::cout << "poop\n";
+        #include "../poop.h"
+        std::memcpy(hidden_, parameters, I * H);
+        std::memcpy(hidden_bias_, parameters + I * H, H);
+        std::memcpy(hidden_, parameters + I * H + H, H * O);
+        std::memcpy(hidden_, parameters + I * H + H + H * O, O);
+    }
+
     void forward(int inputs[I], float out[O]) {
-        float scratch[H] = hidden_bias_;
-        float scratch2[O] = out_bias_;
+        float some[I];
+        for (int i = 0; i < I; i++) {
+            some[i] = (float)inputs[i];
+        }
+
+        float scratch[H];
+        memcpy(scratch, hidden_bias_, H);
+        float scratch2[O];
+        memcpy(scratch2, out_bias_, O);
 
         for (int i = 0; i < I; i++)
-            dot<I>(inputs, hidden_ + i * I, scratch + i);
+            dot<I>(some, hidden_ + i * I, scratch + i);
         for (int i = 0; i < O; i++)
-            dot<H>(scratch, out_ + i * H, scratch2 + i);
-
-        memcpy(out, scratch2);
+            dot<H>(scratch, out_ + i * H, out + i);
     }
 };
