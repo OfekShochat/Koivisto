@@ -848,15 +848,13 @@ Score Search::pvSearch(Board* b, Score alpha, Score beta, Depth depth, Depth ply
             lmr++;
 
         if (lmr) {
-            std::cout << "pooooo" << std::endl;
-    std::cout << std::endl;
-            // Network<16, 8, 1> network;
+            Network<16, 8, 1> network;
             int history = sd->getHistories(m, b->getActivePlayer(), b->getPreviousMove(),
                                            b->getPreviousMove(2), mainThreat);
-            // float *out = {0};
-            // int hi[16] = {alpha, isCapture(m), isCastle(m), depth, staticEval, hashMove != 0, history, isImproving, inCheck, sd->isKiller(m, ply, b->getActivePlayer()), staticExchangeEval, isPromotion, sd->targetReached, bitCount(getNewThreats(b, m)), ply, pv};
-            // network.forward(hi, out);
-            // lmr = out[0];
+            float out[1] = {0};
+            int hi[16] = {alpha, isCapture(m), isCastle(m), depth, staticEval, hashMove != 0, history, isImproving, inCheck, sd->isKiller(m, ply, b->getActivePlayer()), staticExchangeEval, isPromotion, sd->targetReached, bitCount(getNewThreats(b, m)), ply, pv};
+            network.forward(hi, out);
+            lmr = out[0];
             // lmr         = lmr - history / 150;
             // lmr += !isImproving;
             // lmr -= pv;

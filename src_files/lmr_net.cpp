@@ -12,9 +12,9 @@ void dot(float a[S], float b[S], float *out) {
 template <int S>
 void relu(float a[S], float out[S], float M = 0.0f, float X = -1.0f) {
     for (int i = 0; i < S; i++) {
-        out[i] = std::max(out[i], M);
+        out[i] = std::max(a[i], M);
         if (X > M)
-            out[i] = std::min(out[i], X);
+            out[i] = std::min(a[i], X);
     }
 }
 
@@ -28,7 +28,6 @@ class Network {
 
   public:
     Network() {
-        std::cout << "poop\n";
         #include "../poop.h"
         std::memcpy(hidden_, parameters, I * H);
         std::memcpy(hidden_bias_, parameters + I * H, H);
@@ -47,9 +46,12 @@ class Network {
         float scratch2[O];
         memcpy(scratch2, out_bias_, O);
 
-        for (int i = 0; i < I; i++)
+        for (int i = 0; i < H; i++)
             dot<I>(some, hidden_ + i * I, scratch + i);
+        relu<H>(scratch, scratch);
         for (int i = 0; i < O; i++)
-            dot<H>(scratch, out_ + i * H, out + i);
+            dot<H>(scratch, out_ + i * H, scratch2 + i);
+
+        memcpy(out, scratch2, O);
     }
 };

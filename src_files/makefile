@@ -36,7 +36,7 @@ STATIC   ?= 0
 NATIVE   ?= 0
 DETECT   ?= 1
 PGO      ?= 0
-DEBUG    ?= 1
+DEBUG    ?= 0
 LTO      ?= 0
 PEXT     ?= 0
 # vector instructions
